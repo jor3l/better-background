@@ -12,7 +12,7 @@ struct BetterBackgroundApp: App {
     var body: some Scene {
         WindowGroup("BetterBackground") {
             ContentView()
-                .frame(minWidth: 1000, minHeight: 600)
+                .frame(minWidth: 960, minHeight: 600)
         }
     }
 }

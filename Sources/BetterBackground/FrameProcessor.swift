@@ -10,6 +10,9 @@ struct FrameData {
     let disparity: [Float]?
     /// Person mask 0...1, same layout.
     let mask: [Float]?
+    /// Full-resolution Vision mask and depth output, for the playground's preview modes.
+    let maskBuffer: CVPixelBuffer?
+    let depthBuffer: CVPixelBuffer?
     let inferenceMs: Double
 }
 
@@ -57,7 +60,12 @@ final class FrameProcessor {
         return nil
     }
 
-    func process(_ pixelBuffer: CVPixelBuffer) -> FrameData {
+    func process(_ pixelBuffer: CVPixelBuffer, quality: SegmentationQuality) -> FrameData {
+        switch quality {
+        case .fast: segRequest.qualityLevel = .fast
+        case .balanced: segRequest.qualityLevel = .balanced
+        case .accurate: segRequest.qualityLevel = .accurate
+        }
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
         var requests: [VNRequest] = [segRequest]
         if let depthRequest { requests.append(depthRequest) }
@@ -68,20 +76,24 @@ final class FrameProcessor {
 
         let w = Self.gridW, h = Self.gridH
         var mask: [Float]?
-        if let buffer = segRequest.results?.first?.pixelBuffer {
-            mask = Self.sample(buffer, w: w, h: h)
+        let maskBuffer = segRequest.results?.first?.pixelBuffer
+        if let maskBuffer {
+            mask = Self.sample(maskBuffer, w: w, h: h)
         }
 
         var disparity: [Float]?
+        var depthBuffer: CVPixelBuffer?
         if let result = depthRequest?.results?.first {
             if let obs = result as? VNPixelBufferObservation {
+                depthBuffer = obs.pixelBuffer
                 disparity = Self.sample(obs.pixelBuffer, w: w, h: h)
             } else if let obs = result as? VNCoreMLFeatureValueObservation,
                       let array = obs.featureValue.multiArrayValue {
                 disparity = Self.sample(array, w: w, h: h)
             }
         }
-        return FrameData(pixelBuffer: pixelBuffer, disparity: disparity, mask: mask, inferenceMs: ms)
+        return FrameData(pixelBuffer: pixelBuffer, disparity: disparity, mask: mask,
+                         maskBuffer: maskBuffer, depthBuffer: depthBuffer, inferenceMs: ms)
     }
 
     // MARK: - Sampling
@@ -160,16 +172,27 @@ final class Pipeline {
     private var processor: FrameProcessor?
     private let lock = NSLock()
     private var waitingForMain = false
+    private var quality: SegmentationQuality = .balanced
+    private var paused = false
 
     var onStatus: ((String) -> Void)?
     var onResult: ((FrameData) -> Void)?
 
+    func setQuality(_ q: SegmentationQuality) {
+        lock.lock(); quality = q; lock.unlock()
+    }
+
+    func setPaused(_ p: Bool) {
+        lock.lock(); paused = p; lock.unlock()
+    }
+
     /// Called on the camera queue.
     func handle(_ pixelBuffer: CVPixelBuffer) {
         lock.lock()
-        let busy = waitingForMain
+        let skip = waitingForMain || paused
+        let quality = self.quality
         lock.unlock()
-        if busy { return }
+        if skip { return }
 
         if processor == nil {
             let p = FrameProcessor()
@@ -177,7 +200,7 @@ final class Pipeline {
             onStatus?(p.modelStatus)
         }
         guard let processor else { return }
-        let data = processor.process(pixelBuffer)
+        let data = processor.process(pixelBuffer, quality: quality)
 
         lock.lock()
         waitingForMain = true
