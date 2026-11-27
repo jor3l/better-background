@@ -34,7 +34,7 @@ final class SceneModelStore: ObservableObject {
         downloadBytes: 6_260_000_000
     )
 
-    static let controlNetName = "Depth"
+    nonisolated static let controlNetName = "Depth"
 
     @Published private(set) var state: State = .notInstalled
     /// Folder holding TextEncoder/ControlledUnet/VAE models, vocab.json, merges.txt and controlnet/Depth.mlmodelc.
@@ -46,7 +46,7 @@ final class SceneModelStore: ObservableObject {
     private var task: Task<Void, Never>?
     private let customFolderKey = "aiScene.customModelFolder"
 
-    static var modelsRoot: URL {
+    nonisolated static var modelsRoot: URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return support.appending(path: "BetterBackground/Models", directoryHint: .isDirectory)
     }
