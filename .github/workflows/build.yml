@@ -2,13 +2,18 @@ name: Build
 
 on:
   push:
-    branches: ["**"]
+    branches: [main]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: write
+
+# A newer push to the same branch or PR cancels the run still in progress.
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
