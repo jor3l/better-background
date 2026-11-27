@@ -131,11 +131,12 @@ struct StatsOverlay: View {
 // MARK: - Settings
 
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case environment, lighting, person, camera, view, presets
+    case environment, ai, lighting, person, camera, view, presets
     var id: String { rawValue }
     var title: String {
         switch self {
         case .environment: "Scene"
+        case .ai: "AI scene"
         case .lighting: "Light"
         case .person: "Person"
         case .camera: "Camera"
@@ -146,6 +147,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .environment: "cube"
+        case .ai: "wand.and.stars"
         case .lighting: "lightbulb"
         case .person: "person.crop.rectangle"
         case .camera: "camera"
@@ -183,6 +185,7 @@ struct SettingsSidebar: View {
             Form {
                 switch section {
                 case .environment: EnvironmentPanel(stage: stage)
+                case .ai: AIScenePanel(stage: stage, controller: stage.aiScene, models: stage.aiScene.models)
                 case .lighting: LightingPanel(stage: stage)
                 case .person: PersonPanel(stage: stage)
                 case .camera: CameraPanel(stage: stage)

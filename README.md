@@ -16,6 +16,15 @@ The app is a playground for testing the product and tuning it live:
   - **Presets**: save the current settings under a name, load or delete presets, or reset everything.
 - Settings are saved automatically and restored on the next launch.
 
+## AI scene
+
+**Settings > AI scene** puts you in a room drawn by an image model instead of the built-in 3D rooms:
+
+1. Click **Download model** once. It fetches [Stable Diffusion 1.5 for Core ML with ControlNet support](https://huggingface.co/coreml-community/coreml-stable-diffusion-v1-5_cn) and the [Depth ControlNet](https://huggingface.co/coreml-community/ControlNet-Models-For-Core-ML) (about 6 GB download, about 5 GB on disk, CreativeML OpenRAIL-M licence) into `~/Library/Application Support/BetterBackground/Models`. If you already have a compatible model folder, **Use a model folder I already have…** points the app at it.
+2. Turn on **Use an AI-generated scene**, pick a style or write a prompt, and click **Generate** (⌘R).
+
+The app takes a snapshot of your camera, paints you out of it, and has the model redraw the room from your prompt. The depth map keeps the layout (desk, walls, windows) and the webcam's own angle, so the generated room lines up with you. Generation runs on your Mac (on the GPU) and takes a few seconds to half a minute depending on the chip; the first run also loads the model, which takes a minute or two. You stay live in front of the picture and are relit to match its light (**Match my lighting to the scene**). **Change from my room** sets how much of your real room survives, and **Refresh** can regenerate on a timer. The last scene is kept between launches. For the cleanest room, step out of the shot while it takes the snapshot.
+
 Under the hood: [Depth Anything V2 Small](https://huggingface.co/apple/coreml-depth-anything-v2-small) (Apple's Core ML conversion) and Apple Vision person segmentation run on every frame. You are drawn as a depth-displaced surface in a RealityKit room. A Metal pass relights the camera image using normals from the depth map and the scene's lights, and softens the cutout edge. The virtual camera sits where your real webcam is, so the room is seen from the same angle as you, with only small parallax moves. Only open-source models and Apple frameworks are used.
 
 ## Getting the app

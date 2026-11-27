@@ -103,6 +103,13 @@ struct Tuning: Codable, Equatable {
     var sway: Float = 0.02              // automatic camera drift in metres, small parallax only
     var dragRange: Float = 0.15         // how far dragging can move the camera, metres
 
+    // AI scene. Optional so settings saved before it existed still load.
+    var aiScene: AISceneSettings?
+    var ai: AISceneSettings {
+        get { aiScene ?? AISceneSettings() }
+        set { aiScene = newValue }
+    }
+
     /// Defaults for a given environment: colours and lighting that suit it.
     static func defaults(for kind: EnvironmentKind) -> Tuning {
         var t = Tuning()
