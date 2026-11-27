@@ -22,6 +22,14 @@
     <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>SUFeedURL</key>
+    <string>https://github.com/jor3l/better-background/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>lB/SQM2XRkkR7447i7lhb4qzfyfjcayIUVZ8IeYy3MQ=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
     <key>NSCameraUsageDescription</key>
     <string>BetterBackground uses your camera to place you inside a 3D scene.</string>
 </dict>

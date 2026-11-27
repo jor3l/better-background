@@ -3,9 +3,14 @@ name: Build
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump for this release (auto reads commit messages)"
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
 
 permissions:
   contents: write
@@ -18,13 +23,29 @@ concurrency:
 jobs:
   build:
     runs-on: macos-15
+    env:
+      # Every successful build of main becomes a GitHub Release (and an app update).
+      RELEASE: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags and history, for versioning
 
       - name: Show toolchain
         run: |
           xcodebuild -version
           swift --version
+
+      - name: Work out version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump || 'auto' }}
+        run: |
+          version="$(scripts/next_version.sh)"
+          last_tag="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' HEAD^ 2>/dev/null || true)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "last_tag=$last_tag" >> "$GITHUB_OUTPUT"
+          echo "Version $version (previous release: ${last_tag:-none}, release: $RELEASE)"
 
       - name: Cache depth model
         id: model-cache
@@ -45,8 +66,7 @@ jobs:
 
       - name: Build app and dmg
         env:
-          VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '0.1.0' }}
-          BUILD_NUMBER: ${{ github.run_number }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: scripts/package_app.sh
 
       - name: Upload dmg
@@ -55,8 +75,40 @@ jobs:
           name: BetterBackground-dmg
           path: build/BetterBackground.dmg
 
-      - name: Publish release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Sign update and write appcast
+        if: env.RELEASE == 'true'
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
+          LAST_TAG: ${{ steps.version.outputs.last_tag }}
+        run: |
+          range="${LAST_TAG:+$LAST_TAG..}HEAD"
+          git log --no-merges --format='%s' "$range" | head -n 30 > build/notes.txt
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "::warning::SPARKLE_PRIVATE_KEY secret is not set, so this release has no appcast and installed apps won't be offered it."
+            exit 0
+          fi
+          python3 -m venv build/venv
+          build/venv/bin/pip install --quiet cryptography
+          build/venv/bin/python scripts/make_appcast.py \
+            --dmg build/BetterBackground.dmg \
+            --version "$VERSION" \
+            --url "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/BetterBackground.dmg" \
+            --notes-url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/v${VERSION}" \
+            --notes-file build/notes.txt \
+            --plist build/BetterBackground.app/Contents/Info.plist \
+            --out build/appcast.xml
+
+      - name: Publish release
+        if: env.RELEASE == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          files: build/BetterBackground.dmg
+          tag_name: v${{ steps.version.outputs.version }}
+          name: BetterBackground ${{ steps.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          make_latest: true
+          fail_on_unmatched_files: false
+          files: |
+            build/BetterBackground.dmg
+            build/appcast.xml
