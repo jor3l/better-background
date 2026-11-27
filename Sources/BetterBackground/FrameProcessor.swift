@@ -14,15 +14,28 @@ struct FrameData {
     let maskBuffer: CVPixelBuffer?
     let depthBuffer: CVPixelBuffer?
     let inferenceMs: Double
+    /// Largest face, if any.
+    let face: FaceInfo?
+}
+
+/// A detected face in image space (0...1, origin top-left, not mirrored).
+struct FaceInfo {
+    var centerX: Float
+    var centerY: Float
+    var width: Float
+    var height: Float
+    /// Head pitch in radians as Vision reports it, if available.
+    var pitch: Float?
 }
 
 /// Runs Vision person segmentation and Depth Anything V2 on a frame.
 final class FrameProcessor {
-    static let gridW = 160
-    static let gridH = 90
+    static let gridW = 192
+    static let gridH = 108
     static let modelName = "DepthAnythingV2SmallF16"
 
     private let segRequest: VNGeneratePersonSegmentationRequest
+    private let faceRequest = VNDetectFaceRectanglesRequest()
     private var depthRequest: VNCoreMLRequest?
     let modelStatus: String
 
@@ -67,7 +80,7 @@ final class FrameProcessor {
         case .accurate: segRequest.qualityLevel = .accurate
         }
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
-        var requests: [VNRequest] = [segRequest]
+        var requests: [VNRequest] = [segRequest, faceRequest]
         if let depthRequest { requests.append(depthRequest) }
 
         let start = DispatchTime.now().uptimeNanoseconds
@@ -92,8 +105,20 @@ final class FrameProcessor {
                 disparity = Self.sample(array, w: w, h: h)
             }
         }
+        var face: FaceInfo?
+        if let best = faceRequest.results?.max(by: { $0.boundingBox.width < $1.boundingBox.width }) {
+            let box = best.boundingBox // normalised, origin bottom-left
+            face = FaceInfo(
+                centerX: Float(box.midX),
+                centerY: Float(1 - box.midY),
+                width: Float(box.width),
+                height: Float(box.height),
+                pitch: best.pitch.map { Float(truncating: $0) }
+            )
+        }
+
         return FrameData(pixelBuffer: pixelBuffer, disparity: disparity, mask: mask,
-                         maskBuffer: maskBuffer, depthBuffer: depthBuffer, inferenceMs: ms)
+                         maskBuffer: maskBuffer, depthBuffer: depthBuffer, inferenceMs: ms, face: face)
     }
 
     // MARK: - Sampling

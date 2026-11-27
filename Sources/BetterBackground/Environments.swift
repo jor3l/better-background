@@ -118,7 +118,7 @@ enum EnvironmentBuilder {
 
         if t.showDesk {
             let deskColor: NSColor = t.environment == .office ? NSColor(srgbRed: 0.8, green: 0.7, blue: 0.55, alpha: 1) : NSColor(srgbRed: 0.22, green: 0.22, blue: 0.25, alpha: 1)
-            add(box(2.0, 0.05, 0.7, pbr(deskColor, roughness: 0.35), at: [0, 0.74, 0.55], radius: 0.01))
+            add(box(1.6, 0.05, 0.5, pbr(deskColor, roughness: 0.35), at: [0, 0.74, 0.3], radius: 0.01))
         }
 
         return Built(root: root, litModels: lit)

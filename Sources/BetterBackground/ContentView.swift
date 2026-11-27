@@ -47,6 +47,8 @@ struct PreviewArea: View {
 
             ZStack(alignment: .topLeading) {
                 SceneView(stage: stage)
+                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if stage.previewMode != .composite {
                     FlatPreview(preview: stage.preview, mode: stage.previewMode)
                 }
@@ -111,6 +113,7 @@ struct StatsOverlay: View {
                 .monospacedDigit()
             Text(stats.modelStatus)
             Text(stats.cameraStatus)
+            Text(stats.matchSummary)
             if let preview = stats.depthPreview {
                 Image(decorative: preview, scale: 1)
                     .resizable()
@@ -271,15 +274,12 @@ struct PersonPanel: View {
             SliderRow("Smoothing", $stage.tuning.smoothing, 0...0.95, "%.2f")
             Toggle("Invert depth", isOn: $stage.tuning.invertDepth)
         }
-        Section("Placement") {
-            SliderRow("Size", $stage.tuning.personScale, 0.5...1.5, "%.2f×")
-            SliderRow("Left / right", $stage.tuning.personOffsetX, -1...1, "%.2f m")
-            SliderRow("Up / down", $stage.tuning.personOffsetY, -0.5...0.5, "%.2f m")
-            SliderRow("Distance", $stage.tuning.personDistance, -1.5...0.8, "%.2f m")
-        }
         Section("Look") {
-            SliderRow("Original camera light", $stage.tuning.originalLight, 0...1, "%.2f")
-            SliderRow("Surface roughness", $stage.tuning.personRoughness, 0.2...1, "%.2f")
+            SliderRow("Relight by scene", $stage.tuning.relight, 0...1, "%.2f")
+            SliderRow("Face relief", $stage.tuning.relief, 0...6, "%.1f")
+            SliderRow("Edge softness", $stage.tuning.feather, 0...5, "%.1f px")
+            Text("Relight 0 shows your camera image as is; 1 lights you only with the scene's lights.")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 }
@@ -309,12 +309,26 @@ struct ViewPanel: View {
     @ObservedObject var stage: Stage
 
     var body: some View {
-        Section("Virtual camera") {
-            SliderRow("Field of view", $stage.tuning.fieldOfView, 20...80, "%.0f°")
-            SliderRow("Height", $stage.tuning.cameraHeight, 0.6...2.0, "%.2f m")
-            SliderRow("Distance", $stage.tuning.cameraDistance, 1.2...4.5, "%.2f m")
-            SliderRow("Sway", $stage.tuning.sway, 0...0.6, "%.2f m")
-            Text("Drag the preview to move the camera by hand.")
+        Section("Match my webcam") {
+            SliderRow("Webcam field of view", $stage.tuning.webcamFOV, 40...110, "%.0f°")
+            Toggle("Estimate distance from my face", isOn: $stage.tuning.autoDistance)
+            if !stage.tuning.autoDistance {
+                SliderRow("Distance to webcam", $stage.tuning.manualDistance, 0.3...2.5, "%.2f m")
+            }
+            Toggle("Estimate webcam tilt from my head", isOn: $stage.tuning.autoTilt)
+            if stage.tuning.autoTilt {
+                Toggle("Flip detected tilt", isOn: $stage.tuning.invertTilt)
+            }
+            SliderRow("Tilt adjustment", $stage.tuning.tiltOffset, -30...30, "%+.0f°")
+            SliderRow("Head height in the room", $stage.tuning.headHeight, 0.8...1.8, "%.2f m")
+            Toggle("Keep me centred in the room", isOn: $stage.tuning.followFace)
+            Text("The virtual camera sits where your webcam is, so the room is seen from the same angle as you. If the room looks tilted the wrong way, use Flip detected tilt.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        Section("Parallax") {
+            SliderRow("Sway", $stage.tuning.sway, 0...0.1, "%.2f m")
+            SliderRow("Drag range", $stage.tuning.dragRange, 0...0.4, "%.2f m")
+            Text("Drag the preview to look around a little. Small moves keep the depth believable.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
