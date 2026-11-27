@@ -55,6 +55,7 @@ final class Stage: ObservableObject {
     }
 
     let stats = DebugStats()
+    let aiScene = AISceneController()
     let preview = PreviewImage()
     let root = Entity()
     var dragOffset = SIMD2<Float>(0, 0)
@@ -133,6 +134,58 @@ final class Stage: ObservableObject {
             .dropFirst()
             .sink { [weak self] _ in self?.startCamera() }
             .store(in: &cancellables)
+
+        // AI scene: show or hide its plate, and keep its refresh timer in step with the settings.
+        $tuning
+            .map { ($0.ai, $0.mirror) }
+            .removeDuplicates { $0 == $1 }
+            .sink { [weak self] ai, _ in
+                guard let self else { return }
+                self.aiScene.updateRefresh(ai) { [weak self] in self?.tuning.ai ?? ai }
+                Task { @MainActor in self.syncAIScene(self.tuning.ai) }
+            }
+            .store(in: &cancellables)
+        aiScene.$plate
+            .dropFirst()
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.syncAIScene(self.tuning.ai)
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    // MARK: - AI scene
+
+    /// Regenerates the AI scene from the next camera frame.
+    func regenerateAIScene() {
+        aiScene.regenerate(tuning.ai)
+    }
+
+    private func syncAIScene(_ ai: AISceneSettings) {
+        if ai.enabled, let entity = aiScene.plateEntity(mirror: tuning.mirror) {
+            if backgroundPlate !== entity { addBackgroundPlate(entity) }
+        } else if let plate = backgroundPlate, plate.name == "AIScenePlate" {
+            removeBackgroundPlate()
+        }
+        cameraLocked = ai.enabled
+        if ai.enabled {
+            dragOffset = .zero
+            if aiScene.plate == nil, aiScene.models.state == .ready, !aiScene.status.isWorking {
+                aiScene.regenerate(ai)
+            }
+        }
+    }
+
+    /// Keeps the plate filling the virtual camera's view, far behind the person.
+    private func placeBackgroundPlate() {
+        guard let plate = backgroundPlate else { return }
+        let distance: Float = 8
+        let width = 2 * distance * tan(tuning.webcamFOV * .pi / 360)
+        plate.orientation = camera.orientation
+        plate.position = camera.position + camera.orientation.act([0, 0, -distance])
+        plate.scale = [width, width * frameAspect, 1]
     }
 
     // MARK: - Presets
@@ -199,6 +252,7 @@ final class Stage: ObservableObject {
     private func apply(_ frame: FrameData) {
         defer { pipeline.resultConsumed() }
         updateCameraMatch(frame)
+        aiScene.consume(frame, invertDepth: tuning.invertDepth)
         surface?.update(with: frame, tuning: tuning, lights: relightParams())
 
         let now = CACurrentMediaTime()
@@ -380,6 +434,9 @@ final class Stage: ObservableObject {
         p.ambient = SIMD4(ambient, 0)
 
         p.misc = [backgroundPlate == nil ? tuning.relight : 0, tuning.relief, 0, 1]
+        if let plate = backgroundPlate, plate.name == "AIScenePlate" {
+            p = aiScene.relightParams(base: p, mirror: tuning.mirror, amount: tuning.ai.matchLight)
+        }
         return p
     }
 
@@ -413,6 +470,7 @@ final class Stage: ObservableObject {
         camera.orientation = rigRotation
         let vfov = 2 * atan(tan(tuning.webcamFOV * .pi / 360) * frameAspect) * 180 / .pi
         camera.camera.fieldOfViewInDegrees = vfov
+        placeBackgroundPlate()
         applyTuning(force: false)
     }
 
