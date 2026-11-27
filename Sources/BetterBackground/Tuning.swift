@@ -49,7 +49,7 @@ enum CaptureResolution: String, Codable, CaseIterable, Identifiable {
 /// Every setting the playground exposes. Saved between launches and in named presets.
 struct Tuning: Codable, Equatable {
     // Camera
-    var resolution: CaptureResolution = .p720
+    var resolution: CaptureResolution = .p1080
     var mirror = true
     var flipV = false
 
@@ -58,19 +58,26 @@ struct Tuning: Codable, Equatable {
     var segmentationQuality: SegmentationQuality = .balanced
     var maskThreshold: Float = 0.5
     var edgeCut: Float = 0.35           // drop triangles that stretch across big depth jumps
+    var feather: Float = 1.5            // softness of the cutout edge, in camera pixels
 
     // Depth
-    var depthScale: Float = 0.35        // metres between farthest and nearest point of the person
+    var depthScale: Float = 0.25        // metres between farthest and nearest point of the person
     var smoothing: Float = 0.6          // temporal smoothing of the surface (0 = none)
     var invertDepth = false             // flip if the model's output turns out to be depth, not disparity
 
-    // Person placement and look
-    var personScale: Float = 1.0
-    var personOffsetX: Float = 0
-    var personOffsetY: Float = 0
-    var personDistance: Float = 0       // metres towards (+) or away from (-) the scene camera
-    var originalLight: Float = 0.2      // how much of the camera image is shown unlit
-    var personRoughness: Float = 0.7
+    // Person look
+    var relight: Float = 0.75           // 0 = camera image as is, 1 = fully relit by the scene
+    var relief: Float = 2.5             // how strongly depth bends the lighting on the face
+
+    // Camera match: the virtual camera sits where your webcam is
+    var webcamFOV: Float = 68           // horizontal field of view of your webcam, degrees
+    var autoDistance = true             // estimate how far you are from the face size
+    var manualDistance: Float = 0.7     // metres, used when autoDistance is off
+    var autoTilt = true                 // estimate the webcam's tilt from your head pose
+    var invertTilt = false
+    var tiltOffset: Float = 0           // degrees added to the detected (or zero) tilt
+    var headHeight: Float = 1.2         // where your face sits in the room, metres
+    var followFace = true               // keep your face centred in the room as you move
 
     // Lighting
     var keyIntensity: Float = 60_000
@@ -90,13 +97,11 @@ struct Tuning: Codable, Equatable {
     var floorColor = RGBColor(0.42, 0.30, 0.22)
     var accentColor = RGBColor(0.75, 0.85, 1.0)
     var showProps = true
-    var showDesk = true
+    var showDesk = false
 
     // View
-    var fieldOfView: Float = 42
-    var cameraHeight: Float = 1.2
-    var cameraDistance: Float = 2.5
-    var sway: Float = 0.15              // automatic camera drift in metres, shows parallax
+    var sway: Float = 0.02              // automatic camera drift in metres, small parallax only
+    var dragRange: Float = 0.15         // how far dragging can move the camera, metres
 
     /// Defaults for a given environment: colours and lighting that suit it.
     static func defaults(for kind: EnvironmentKind) -> Tuning {
@@ -127,7 +132,7 @@ struct Tuning: Codable, Equatable {
             t.rimIntensity = 60_000
             t.fillIntensity = 50
             t.environmentLight = -2.5
-            t.originalLight = 0.15
+            t.relight = 0.85
         case .office:
             t.wallColor = RGBColor(0.92, 0.92, 0.9)
             t.floorColor = RGBColor(0.55, 0.55, 0.52)
@@ -158,7 +163,7 @@ struct Tuning: Codable, Equatable {
         t.rimIntensity = d.rimIntensity
         t.fillIntensity = d.fillIntensity
         t.environmentLight = d.environmentLight
-        t.originalLight = d.originalLight
+        t.relight = d.relight
         return t
     }
 }
@@ -172,7 +177,7 @@ struct SavedPreset: Codable, Identifiable, Equatable {
 
 /// Reads and writes settings and presets in UserDefaults.
 enum SettingsStore {
-    private static let tuningKey = "tuning.v1"
+    private static let tuningKey = "tuning.v2"
     private static let presetsKey = "presets.v1"
     private static let cameraKey = "camera.v1"
 

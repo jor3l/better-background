@@ -25,6 +25,7 @@ final class DebugStats: ObservableObject {
     @Published var modelStatus = "Loading depth model…"
     @Published var cameraStatus = "Starting camera…"
     @Published var maskCoverage: Double = 0
+    @Published var matchSummary = "Looking for your face…"
     @Published var depthPreview: CGImage?
 }
 
@@ -61,6 +62,22 @@ final class Stage: ObservableObject {
 
     private var surface: PersonSurface?
     private let personAnchor = Entity()
+    private var backgroundPlate: Entity?
+
+    /// When true the virtual camera and the person stay where they are: no sway, drag or face following.
+    var cameraLocked = false
+
+    // Camera match state, smoothed over frames.
+    private var estDistance: Float = 0.7
+    private var estTilt: Float = 0
+    private var estFace = SIMD2<Float>(0, 0)     // face position on the person plane, metres from its centre
+    private var haveFace = false
+    private var frameAspect: Float = 9.0 / 16.0
+    /// Where the virtual camera sits and looks, recomputed every frame.
+    private var rigCamera = SIMD3<Float>(0, 1.2, 0.7)
+    private var rigRotation = simd_quatf(angle: 0, axis: [1, 0, 0])
+    private var headWorld = SIMD3<Float>(0, 1.2, 0)
+
     private var environmentEntity: Entity?
     private var builtEnvironmentKey: EnvironmentKey?
     private let camera = PerspectiveCamera()
@@ -181,7 +198,8 @@ final class Stage: ObservableObject {
 
     private func apply(_ frame: FrameData) {
         defer { pipeline.resultConsumed() }
-        surface?.update(with: frame, tuning: tuning)
+        updateCameraMatch(frame)
+        surface?.update(with: frame, tuning: tuning, lights: relightParams())
 
         let now = CACurrentMediaTime()
         frameTimes.append(now)
@@ -272,17 +290,129 @@ final class Stage: ObservableObject {
         environmentEntity = built.root
     }
 
+    // MARK: - Camera match
+
+    /// Estimates webcam distance and tilt from the face, then places the person plane and the
+    /// virtual camera so the scene is seen from where the real webcam is.
+    private func updateCameraMatch(_ frame: FrameData) {
+        let w = Float(CVPixelBufferGetWidth(frame.pixelBuffer))
+        let h = Float(CVPixelBufferGetHeight(frame.pixelBuffer))
+        if w > 0 { frameAspect = h / w }
+        guard !cameraLocked else { return }
+
+        let tanH = tan(tuning.webcamFOV * .pi / 360)
+
+        if let face = frame.face {
+            // An adult face box from Vision is roughly 15 cm wide.
+            let measured = min(max(0.15 / max(face.width * 2 * tanH, 1e-3), 0.3), 3.0)
+            estDistance = haveFace ? estDistance + (measured - estDistance) * 0.08 : measured
+            if let pitch = face.pitch {
+                let p = tuning.invertTilt ? -pitch : pitch
+                estTilt += (min(max(p, -0.5), 0.5) - estTilt) * 0.05
+            }
+            let D = tuning.autoDistance ? estDistance : tuning.manualDistance
+            let W = 2 * D * tanH
+            let H = W * frameAspect
+            let u = tuning.mirror ? 1 - face.centerX : face.centerX
+            let local = SIMD2<Float>((u - 0.5) * W, (0.5 - face.centerY) * H)
+            estFace = haveFace ? estFace + (local - estFace) * 0.15 : local
+            haveFace = true
+        }
+
+        let D = tuning.autoDistance ? estDistance : tuning.manualDistance
+        let W = 2 * D * tanH
+        let H = W * frameAspect
+        let tilt = (tuning.autoTilt ? estTilt : 0) + tuning.tiltOffset * .pi / 180
+
+        let rotation = simd_quatf(angle: tilt, axis: [1, 0, 0])
+        let forward = rotation.act([0, 0, -1])
+        let up = rotation.act([0, 1, 0])
+        let right = rotation.act([1, 0, 0])
+
+        // Rig in its own space: camera at (0, 0, D), plane centre D metres along its view.
+        let camera0 = SIMD3<Float>(0, 0, D)
+        let planeCenter0 = camera0 + forward * D
+        let face0 = planeCenter0 + right * estFace.x + up * estFace.y
+        let target = SIMD3<Float>(tuning.followFace ? 0 : face0.x, tuning.headHeight, 0)
+        let shift = target - face0
+
+        rigCamera = camera0 + shift
+        rigRotation = rotation
+        headWorld = target
+
+        surface?.width = W
+        surface?.height = H
+        personAnchor.position = planeCenter0 + shift
+        personAnchor.orientation = rotation
+        personAnchor.scale = [1, 1, 1]
+
+        let summary = haveFace
+            ? String(format: "Webcam %.2f m away, tilted %+.0f°", D, tilt * 180 / .pi)
+            : "Looking for your face…"
+        if frameCounter % 10 == 0, stats.matchSummary != summary { stats.matchSummary = summary }
+    }
+
+    /// Scene lights expressed for the relight shader, in the person's image space.
+    private func relightParams() -> RelightParams {
+        var p = RelightParams()
+        let inverse = rigRotation.inverse
+        func imageSpace(_ worldDir: SIMD3<Float>) -> SIMD4<Float> {
+            var d = inverse.act(simd_normalize(worldDir))
+            if tuning.mirror { d.x = -d.x }
+            return SIMD4(d.x, d.y, d.z, 0)
+        }
+        func rgb(_ c: NSColor) -> SIMD3<Float> {
+            let s = c.usingColorSpace(.sRGB) ?? c
+            return [Float(s.redComponent), Float(s.greenComponent), Float(s.blueComponent)]
+        }
+
+        p.keyDir = imageSpace(keyLight.position(relativeTo: nil) - headWorld)
+        let key = rgb(Self.color(kelvin: tuning.keyKelvin)) * (tuning.keyIntensity / 60_000 * 0.75)
+        p.keyColor = SIMD4(key, 0)
+
+        p.rimDir = imageSpace(rimLight.position(relativeTo: nil) - headWorld)
+        let rim = tuning.rimOn ? rgb(tuning.rimColor.nsColor) * (tuning.rimIntensity / 25_000 * 0.45) : .zero
+        p.rimColor = SIMD4(rim, 0)
+
+        let ambientLevel = 0.25 * pow(2, tuning.environmentLight) + tuning.fillIntensity / 1_000 * 0.4
+        let wall = rgb(tuning.wallColor.nsColor)
+        let ambient = (SIMD3<Float>(repeating: 0.7) + wall * 0.3) * ambientLevel
+        p.ambient = SIMD4(ambient, 0)
+
+        p.misc = [backgroundPlate == nil ? tuning.relight : 0, tuning.relief, 0, 1]
+        return p
+    }
+
+    // MARK: - Background plate (used by other scene modes)
+
+    /// Shows `entity` instead of the room.
+    func addBackgroundPlate(_ entity: Entity) {
+        removeBackgroundPlate()
+        backgroundPlate = entity
+        root.addChild(entity)
+        environmentEntity?.isEnabled = false
+    }
+
+    func removeBackgroundPlate() {
+        backgroundPlate?.removeFromParent()
+        backgroundPlate = nil
+        environmentEntity?.isEnabled = true
+    }
+
     /// Called every rendered frame.
     func tick(_ dt: TimeInterval) {
         time += dt
         let t = Float(time)
-        let sway = tuning.sway
-        let position = SIMD3<Float>(
-            sin(t * 0.5) * sway + dragOffset.x,
-            tuning.cameraHeight + sin(t * 0.37) * sway * 0.3 + dragOffset.y,
-            tuning.cameraDistance
-        )
-        camera.look(at: [0, 1.05, 0.1], from: position, relativeTo: nil)
+        var offset = SIMD3<Float>.zero
+        if !cameraLocked {
+            let sway = tuning.sway
+            let drag = dragOffset.clamped(lowerBound: SIMD2(repeating: -1), upperBound: SIMD2(repeating: 1)) * tuning.dragRange
+            offset = rigRotation.act(SIMD3(sin(t * 0.5) * sway + drag.x, sin(t * 0.37) * sway * 0.5 + drag.y, 0))
+        }
+        camera.position = rigCamera + offset
+        camera.orientation = rigRotation
+        let vfov = 2 * atan(tan(tuning.webcamFOV * .pi / 360) * frameAspect) * 180 / .pi
+        camera.camera.fieldOfViewInDegrees = vfov
         applyTuning(force: false)
     }
 
@@ -291,19 +421,12 @@ final class Stage: ObservableObject {
         appliedTuning = tuning
 
         rebuildEnvironmentIfNeeded()
-
-        camera.camera.fieldOfViewInDegrees = tuning.fieldOfView
-
-        // Person placement: scale around the centre of the video frame.
-        let center: SIMD3<Float> = [0, surface?.centerY ?? 1.05, 0]
-        let s = tuning.personScale
-        personAnchor.scale = [s, s, s]
-        personAnchor.position = center * (1 - s) + [tuning.personOffsetX, tuning.personOffsetY, tuning.personDistance]
+        if backgroundPlate != nil { environmentEntity?.isEnabled = false }
 
         let az = tuning.keyAzimuth * .pi / 180
         let radius: Float = 2.4
         let keyPosition = SIMD3<Float>(sin(az) * radius, tuning.keyHeight, cos(az) * radius)
-        keyLight.look(at: [0, 1.05, 0], from: keyPosition, relativeTo: nil)
+        keyLight.look(at: headWorld, from: keyPosition, relativeTo: nil)
         keyLight.components.set(SpotLightComponent(
             color: Self.color(kelvin: tuning.keyKelvin),
             intensity: tuning.keyIntensity,

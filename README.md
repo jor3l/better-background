@@ -12,11 +12,11 @@ The app is a playground for testing the product and tuning it live:
   - **Light**: key light intensity, direction, height, colour temperature and shadows; rim light colour and intensity; front fill and environment light.
   - **Person**: cutout on/off, mask quality and threshold, edge cut, depth strength and smoothing, size and position in the room, and how much of the original camera light is kept.
   - **Camera**: device, resolution, mirror and flip.
-  - **View**: virtual camera field of view, height, distance and sway. You can also drag the preview to move it.
+  - **View**: match the virtual camera to your webcam (field of view, distance estimated from your face size, tilt estimated from your head pose, head height in the room) and set how much parallax sway and dragging adds.
   - **Presets**: save the current settings under a name, load or delete presets, or reset everything.
 - Settings are saved automatically and restored on the next launch.
 
-Under the hood: [Depth Anything V2 Small](https://huggingface.co/apple/coreml-depth-anything-v2-small) (Apple's Core ML conversion) and Apple Vision person segmentation run on every frame. You are drawn as a depth-displaced surface in a RealityKit room, so the scene's lights shade you and the camera shows a little parallax. Only open-source models and Apple frameworks are used.
+Under the hood: [Depth Anything V2 Small](https://huggingface.co/apple/coreml-depth-anything-v2-small) (Apple's Core ML conversion) and Apple Vision person segmentation run on every frame. You are drawn as a depth-displaced surface in a RealityKit room. A Metal pass relights the camera image using normals from the depth map and the scene's lights, and softens the cutout edge. The virtual camera sits where your real webcam is, so the room is seen from the same angle as you, with only small parallax moves. Only open-source models and Apple frameworks are used.
 
 ## Getting the app
 
