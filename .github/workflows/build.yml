@@ -1,0 +1,57 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Cache depth model
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: Models
+          key: depth-anything-v2-small-f16-v1
+
+      - name: Download Depth Anything V2 Small (Core ML)
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        run: python3 scripts/fetch_model.py Models
+
+      - name: Compile Core ML model
+        run: |
+          mkdir -p build/model
+          xcrun coremlcompiler compile Models/DepthAnythingV2SmallF16.mlpackage build/model
+          ls build/model
+
+      - name: Build app and dmg
+        env:
+          VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '0.1.0' }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: scripts/package_app.sh
+
+      - name: Upload dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: BetterBackground-dmg
+          path: build/BetterBackground.dmg
+
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/BetterBackground.dmg
