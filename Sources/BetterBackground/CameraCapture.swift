@@ -24,14 +24,14 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         ).devices
     }
 
-    func start(deviceID: String?, completion: @escaping (String?) -> Void) {
+    func start(deviceID: String?, resolution: CaptureResolution = .p720, completion: @escaping (String?) -> Void) {
         AVCaptureDevice.requestAccess(for: .video) { granted in
             guard granted else {
                 completion("Camera access was denied. Allow it in System Settings > Privacy & Security > Camera.")
                 return
             }
             self.sessionQueue.async {
-                let error = self.configure(deviceID: deviceID)
+                let error = self.configure(deviceID: deviceID, resolution: resolution)
                 if error == nil, !self.session.isRunning {
                     self.session.startRunning()
                 }
@@ -40,7 +40,7 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
     }
 
-    private func configure(deviceID: String?) -> String? {
+    private func configure(deviceID: String?, resolution: CaptureResolution) -> String? {
         session.beginConfiguration()
         defer { session.commitConfiguration() }
 
@@ -63,7 +63,10 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             return error.localizedDescription
         }
 
-        if session.canSetSessionPreset(.hd1280x720) {
+        let preset: AVCaptureSession.Preset = resolution == .p1080 ? .hd1920x1080 : .hd1280x720
+        if session.canSetSessionPreset(preset) {
+            session.sessionPreset = preset
+        } else if session.canSetSessionPreset(.hd1280x720) {
             session.sessionPreset = .hd1280x720
         }
 

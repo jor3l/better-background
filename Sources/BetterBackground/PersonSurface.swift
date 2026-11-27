@@ -79,7 +79,7 @@ final class PersonSurface {
 
     // MARK: - Texture
 
-    private var lastOriginalLight: Float = -1
+    private var lastMaterialKey: SIMD2<Float> = [-1, -1]
 
     private func updateTexture(_ pixelBuffer: CVPixelBuffer, tuning: Tuning) {
         let w = CVPixelBufferGetWidth(pixelBuffer)
@@ -100,13 +100,15 @@ final class PersonSurface {
             textureSize = (w, h)
             material.baseColor = .init(tint: .white, texture: .init(resource))
             material.emissiveColor = .init(color: .white, texture: .init(resource))
-            lastOriginalLight = -1
+            lastMaterialKey = [-1, -1]
         }
 
-        if lastOriginalLight != tuning.originalLight {
+        let key = SIMD2<Float>(tuning.originalLight, tuning.personRoughness)
+        if lastMaterialKey != key {
             material.emissiveIntensity = tuning.originalLight
+            material.roughness = .init(floatLiteral: tuning.personRoughness)
             entity.model?.materials = [material]
-            lastOriginalLight = tuning.originalLight
+            lastMaterialKey = key
         }
 
         guard let cache = textureCache, let texture else { return }

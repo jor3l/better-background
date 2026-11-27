@@ -1,54 +1,162 @@
 import AppKit
 import Combine
+import CoreImage
 import RealityKit
 import SwiftUI
 
-/// Live numbers for the overlay. Kept separate so updating them doesn't re-render the 3D view.
+enum PreviewMode: String, CaseIterable, Identifiable {
+    case composite, camera, mask, depth
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .composite: "Composite"
+        case .camera: "Camera"
+        case .mask: "Mask"
+        case .depth: "Depth"
+        }
+    }
+}
+
+/// Live numbers for the overlay. Kept separate so updating them doesn't re-render the panels.
 @MainActor
 final class DebugStats: ObservableObject {
     @Published var fps: Double = 0
     @Published var inferenceMs: Double = 0
     @Published var modelStatus = "Loading depth model…"
+    @Published var cameraStatus = "Starting camera…"
+    @Published var maskCoverage: Double = 0
     @Published var depthPreview: CGImage?
 }
 
-/// Owns the RealityKit scene, the camera pipeline and the tuning values.
+/// The 2D image shown in the camera, mask and depth preview modes.
+@MainActor
+final class PreviewImage: ObservableObject {
+    @Published var image: CGImage?
+}
+
+/// Owns the RealityKit scene, the camera pipeline and every setting.
 @MainActor
 final class Stage: ObservableObject {
-    @Published var tuning = Tuning()
-    @Published var status = "Starting camera…"
+    @Published var tuning: Tuning
+    @Published var presets: [SavedPreset]
     @Published var cameras: [CameraInfo] = []
-    @Published var selectedCamera = "" {
-        didSet { if oldValue != selectedCamera, !selectedCamera.isEmpty { startCamera() } }
+    @Published var selectedCamera: String {
+        didSet {
+            guard oldValue != selectedCamera else { return }
+            SettingsStore.cameraID = selectedCamera
+            startCamera()
+        }
+    }
+    @Published var previewMode: PreviewMode = .composite
+    @Published var showStats = true
+    @Published var paused = false {
+        didSet { pipeline.setPaused(paused) }
     }
 
     let stats = DebugStats()
+    let preview = PreviewImage()
     let root = Entity()
     var dragOffset = SIMD2<Float>(0, 0)
     var updateSubscription: EventSubscription?
 
     private var surface: PersonSurface?
+    private let personAnchor = Entity()
+    private var environmentEntity: Entity?
+    private var builtEnvironmentKey: EnvironmentKey?
     private let camera = PerspectiveCamera()
     private let keyLight = Entity()
     private let rimLight = Entity()
-    private var iblEntity: Entity?
-    private var receivers: [Entity] = []
+    private let fillLight = Entity()
+    private let ibl = Entity()
+    private var hasEnvironmentResource = false
 
     private let capture = CameraCapture()
     private let pipeline = Pipeline()
+    private let ciContext = CIContext()
     private var time: Double = 0
     private var appliedTuning: Tuning?
     private var frameTimes: [Double] = []
     private var frameCounter = 0
+    private var cancellables: Set<AnyCancellable> = []
+
+    /// The parts of the settings that require rebuilding the room.
+    private struct EnvironmentKey: Equatable {
+        var kind: EnvironmentKind
+        var wall, floor, accent, rim: RGBColor
+        var props, desk: Bool
+        init(_ t: Tuning) {
+            kind = t.environment
+            wall = t.wallColor; floor = t.floorColor; accent = t.accentColor; rim = t.rimColor
+            props = t.showProps; desk = t.showDesk
+        }
+    }
 
     init() {
+        tuning = SettingsStore.loadTuning()
+        presets = SettingsStore.loadPresets()
+        selectedCamera = SettingsStore.cameraID
         buildScene()
+
+        // Save settings shortly after they stop changing.
+        $tuning
+            .dropFirst()
+            .debounce(for: .milliseconds(400), scheduler: RunLoop.main)
+            .sink { SettingsStore.save($0) }
+            .store(in: &cancellables)
+
+        $tuning
+            .map(\.segmentationQuality)
+            .removeDuplicates()
+            .sink { [pipeline] in pipeline.setQuality($0) }
+            .store(in: &cancellables)
+
+        $tuning
+            .map(\.resolution)
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in self?.startCamera() }
+            .store(in: &cancellables)
+    }
+
+    // MARK: - Presets
+
+    func resetAll() {
+        tuning = Tuning()
+    }
+
+    func resetLookToEnvironment() {
+        tuning = tuning.applyingEnvironment(tuning.environment)
+    }
+
+    func selectEnvironment(_ kind: EnvironmentKind) {
+        tuning = tuning.applyingEnvironment(kind)
+    }
+
+    func savePreset(named name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        if let i = presets.firstIndex(where: { $0.name == trimmed }) {
+            presets[i].tuning = tuning
+        } else {
+            presets.append(SavedPreset(name: trimmed, tuning: tuning))
+        }
+        SettingsStore.save(presets)
+    }
+
+    func load(_ preset: SavedPreset) {
+        tuning = preset.tuning
+    }
+
+    func delete(_ preset: SavedPreset) {
+        presets.removeAll { $0.id == preset.id }
+        SettingsStore.save(presets)
     }
 
     // MARK: - Camera pipeline
 
     func start() {
-        cameras = CameraCapture.availableDevices().map { CameraInfo(id: $0.uniqueID, name: $0.localizedName) }
+        refreshCameras()
+        pipeline.setQuality(tuning.segmentationQuality)
         pipeline.onStatus = { [weak self] message in
             Task { @MainActor in self?.stats.modelStatus = message }
         }
@@ -60,9 +168,14 @@ final class Stage: ObservableObject {
         startCamera()
     }
 
+    func refreshCameras() {
+        cameras = CameraCapture.availableDevices().map { CameraInfo(id: $0.uniqueID, name: $0.localizedName) }
+    }
+
     private func startCamera() {
-        capture.start(deviceID: selectedCamera.isEmpty ? nil : selectedCamera) { [weak self] error in
-            Task { @MainActor in self?.status = error ?? "Camera running" }
+        stats.cameraStatus = "Starting camera…"
+        capture.start(deviceID: selectedCamera.isEmpty ? nil : selectedCamera, resolution: tuning.resolution) { [weak self] error in
+            Task { @MainActor in self?.stats.cameraStatus = error ?? "Camera running" }
         }
     }
 
@@ -74,96 +187,89 @@ final class Stage: ObservableObject {
         frameTimes.append(now)
         frameTimes.removeAll { now - $0 > 1 }
         frameCounter += 1
+
+        if previewMode != .composite {
+            preview.image = previewImage(for: frame)
+        } else if preview.image != nil {
+            preview.image = nil
+        }
+
         if frameCounter % 5 == 0 {
             stats.fps = Double(frameTimes.count)
             stats.inferenceMs = frame.inferenceMs
-            stats.depthPreview = surface?.depthPreview(mirror: tuning.mirror)
+            if let mask = frame.mask {
+                stats.maskCoverage = Double(mask.reduce(0) { $0 + ($1 >= tuning.maskThreshold ? 1 : 0) }) / Double(mask.count)
+            }
+            if showStats {
+                stats.depthPreview = surface?.depthPreview(mirror: tuning.mirror)
+            }
         }
+    }
+
+    private func previewImage(for frame: FrameData) -> CGImage? {
+        switch previewMode {
+        case .composite:
+            return nil
+        case .camera:
+            return cgImage(from: frame.pixelBuffer)
+        case .mask:
+            return frame.maskBuffer.flatMap { cgImage(from: $0) }
+        case .depth:
+            return surface?.depthPreview(mirror: tuning.mirror)
+        }
+    }
+
+    private func cgImage(from buffer: CVPixelBuffer) -> CGImage? {
+        var image = CIImage(cvPixelBuffer: buffer)
+        if tuning.mirror { image = image.oriented(.upMirrored) }
+        return ciContext.createCGImage(image, from: image.extent)
     }
 
     // MARK: - Scene
 
     private func buildScene() {
         root.name = "Root"
+        root.addChild(ibl)
 
-        // Room
-        let floor = ModelEntity(mesh: .generateBox(width: 7, height: 0.02, depth: 7), materials: [Self.pbr(NSColor(red: 0.42, green: 0.30, blue: 0.22, alpha: 1), roughness: 0.6)])
-        floor.position = [0, -0.01, -0.5]
-        let wallMaterial = Self.pbr(NSColor(red: 0.78, green: 0.74, blue: 0.68, alpha: 1), roughness: 0.9)
-        let backWall = ModelEntity(mesh: .generateBox(width: 7, height: 3.2, depth: 0.05), materials: [wallMaterial])
-        backWall.position = [0, 1.6, -2.2]
-        let leftWall = ModelEntity(mesh: .generateBox(width: 0.05, height: 3.2, depth: 5), materials: [wallMaterial])
-        leftWall.position = [-3.0, 1.6, 0.3]
-        let rightWall = ModelEntity(mesh: .generateBox(width: 0.05, height: 3.2, depth: 5), materials: [wallMaterial])
-        rightWall.position = [3.0, 1.6, 0.3]
-
-        // A "window" glowing on the back wall
-        var windowMaterial = UnlitMaterial(color: NSColor(red: 0.75, green: 0.85, blue: 1.0, alpha: 1))
-        windowMaterial.blending = .opaque
-        let window = ModelEntity(mesh: .generatePlane(width: 1.4, height: 1.0), materials: [windowMaterial])
-        window.position = [-1.6, 1.7, -2.17]
-
-        // Shelf with a few objects
-        let shelf = ModelEntity(mesh: .generateBox(width: 1.4, height: 0.04, depth: 0.3), materials: [Self.pbr(NSColor(red: 0.3, green: 0.2, blue: 0.14, alpha: 1), roughness: 0.5)])
-        shelf.position = [1.3, 1.5, -2.02]
-        let book1 = ModelEntity(mesh: .generateBox(width: 0.08, height: 0.28, depth: 0.2), materials: [Self.pbr(.systemRed, roughness: 0.7)])
-        book1.position = [1.0, 1.66, -2.02]
-        let book2 = ModelEntity(mesh: .generateBox(width: 0.07, height: 0.24, depth: 0.2), materials: [Self.pbr(.systemTeal, roughness: 0.7)])
-        book2.position = [1.1, 1.64, -2.02]
-        let vase = ModelEntity(mesh: .generateCylinder(height: 0.3, radius: 0.07), materials: [Self.pbr(.white, roughness: 0.2)])
-        vase.position = [1.6, 1.67, -2.02]
-        let ball = ModelEntity(mesh: .generateSphere(radius: 0.18), materials: [Self.pbr(.systemOrange, roughness: 0.3, metallic: 0.8)])
-        ball.position = [-0.9, 0.18, -1.2]
-        let plant = ModelEntity(mesh: .generateCylinder(height: 1.1, radius: 0.18), materials: [Self.pbr(NSColor(red: 0.2, green: 0.45, blue: 0.25, alpha: 1), roughness: 0.8)])
-        plant.position = [2.2, 0.55, -1.5]
-
-        // Desk in front of the person hides where the video frame ends
-        let desk = ModelEntity(mesh: .generateBox(width: 2.0, height: 0.05, depth: 0.7, cornerRadius: 0.01), materials: [Self.pbr(NSColor(red: 0.22, green: 0.22, blue: 0.25, alpha: 1), roughness: 0.35)])
-        desk.position = [0, 0.74, 0.55]
-
-        let props: [Entity] = [floor, backWall, leftWall, rightWall, window, shelf, book1, book2, vase, ball, plant, desk]
-        props.forEach { root.addChild($0) }
-        receivers = props.filter { $0 !== window }
-
-        // Person
         do {
             let surface = try PersonSurface()
             self.surface = surface
-            root.addChild(surface.entity)
-            receivers.append(surface.entity)
+            personAnchor.addChild(surface.entity)
+            surface.entity.components.set(ImageBasedLightReceiverComponent(imageBasedLight: ibl))
         } catch {
-            status = "Could not create the person surface: \(error.localizedDescription)"
+            stats.cameraStatus = "Could not create the person surface: \(error.localizedDescription)"
         }
+        root.addChild(personAnchor)
 
-        // Lights
-        keyLight.components.set(SpotLightComponent(color: .white, intensity: 60_000, innerAngleInDegrees: 25, outerAngleInDegrees: 55, attenuationRadius: 10))
-        keyLight.components.set(SpotLightComponent.Shadow())
         root.addChild(keyLight)
-
-        rimLight.components.set(PointLightComponent(color: NSColor(red: 0.3, green: 0.6, blue: 1.0, alpha: 1), intensity: 25_000, attenuationRadius: 4))
-        rimLight.position = [-1.3, 1.7, -0.7]
         root.addChild(rimLight)
+        fillLight.look(at: [0, 1.0, 0], from: [0, 1.4, 3], relativeTo: nil)
+        root.addChild(fillLight)
 
-        // Environment (image-based) light from a generated equirectangular gradient
-        let ibl = Entity()
-        root.addChild(ibl)
-        iblEntity = ibl
-        for entity in receivers {
-            entity.components.set(ImageBasedLightReceiverComponent(imageBasedLight: ibl))
-        }
         if let image = Self.makeEnvironmentImage() {
             Task { @MainActor [weak self] in
-                guard let environment = try? await EnvironmentResource(equirectangular: image) else { return }
-                ibl.components.set(ImageBasedLightComponent(source: .single(environment), intensityExponent: self?.tuning.environment ?? 0))
+                guard let self, let environment = try? await EnvironmentResource(equirectangular: image) else { return }
+                self.ibl.components.set(ImageBasedLightComponent(source: .single(environment), intensityExponent: self.tuning.environmentLight))
+                self.hasEnvironmentResource = true
             }
         }
 
-        // Camera
-        camera.camera.fieldOfViewInDegrees = 42
         root.addChild(camera)
-
         applyTuning(force: true)
         tick(0)
+    }
+
+    private func rebuildEnvironmentIfNeeded() {
+        let key = EnvironmentKey(tuning)
+        guard key != builtEnvironmentKey else { return }
+        builtEnvironmentKey = key
+        environmentEntity?.removeFromParent()
+        let built = EnvironmentBuilder.build(tuning)
+        for model in built.litModels {
+            model.components.set(ImageBasedLightReceiverComponent(imageBasedLight: ibl))
+        }
+        root.addChild(built.root)
+        environmentEntity = built.root
     }
 
     /// Called every rendered frame.
@@ -173,8 +279,8 @@ final class Stage: ObservableObject {
         let sway = tuning.sway
         let position = SIMD3<Float>(
             sin(t * 0.5) * sway + dragOffset.x,
-            1.2 + sin(t * 0.37) * sway * 0.3 + dragOffset.y,
-            2.5
+            tuning.cameraHeight + sin(t * 0.37) * sway * 0.3 + dragOffset.y,
+            tuning.cameraDistance
         )
         camera.look(at: [0, 1.05, 0.1], from: position, relativeTo: nil)
         applyTuning(force: false)
@@ -184,9 +290,19 @@ final class Stage: ObservableObject {
         guard force || appliedTuning != tuning else { return }
         appliedTuning = tuning
 
+        rebuildEnvironmentIfNeeded()
+
+        camera.camera.fieldOfViewInDegrees = tuning.fieldOfView
+
+        // Person placement: scale around the centre of the video frame.
+        let center: SIMD3<Float> = [0, surface?.centerY ?? 1.05, 0]
+        let s = tuning.personScale
+        personAnchor.scale = [s, s, s]
+        personAnchor.position = center * (1 - s) + [tuning.personOffsetX, tuning.personOffsetY, tuning.personDistance]
+
         let az = tuning.keyAzimuth * .pi / 180
         let radius: Float = 2.4
-        let keyPosition = SIMD3<Float>(sin(az) * radius, 2.2, cos(az) * radius)
+        let keyPosition = SIMD3<Float>(sin(az) * radius, tuning.keyHeight, cos(az) * radius)
         keyLight.look(at: [0, 1.05, 0], from: keyPosition, relativeTo: nil)
         keyLight.components.set(SpotLightComponent(
             color: Self.color(kelvin: tuning.keyKelvin),
@@ -195,29 +311,30 @@ final class Stage: ObservableObject {
             outerAngleInDegrees: 55,
             attenuationRadius: 10
         ))
+        if tuning.keyShadows {
+            keyLight.components.set(SpotLightComponent.Shadow())
+        } else {
+            keyLight.components.remove(SpotLightComponent.Shadow.self)
+        }
 
         rimLight.isEnabled = tuning.rimOn
+        rimLight.position = [-1.3, 1.7, -0.7]
         rimLight.components.set(PointLightComponent(
-            color: NSColor(red: 0.3, green: 0.6, blue: 1.0, alpha: 1),
+            color: tuning.rimColor.nsColor,
             intensity: tuning.rimIntensity,
             attenuationRadius: 4
         ))
 
-        if let ibl = iblEntity, var component = ibl.components[ImageBasedLightComponent.self] {
-            component.intensityExponent = tuning.environment
+        fillLight.isEnabled = tuning.fillIntensity > 0
+        fillLight.components.set(DirectionalLightComponent(color: .white, intensity: tuning.fillIntensity))
+
+        if hasEnvironmentResource, var component = ibl.components[ImageBasedLightComponent.self] {
+            component.intensityExponent = tuning.environmentLight
             ibl.components.set(component)
         }
     }
 
     // MARK: - Helpers
-
-    static func pbr(_ color: NSColor, roughness: Float, metallic: Float = 0) -> PhysicallyBasedMaterial {
-        var material = PhysicallyBasedMaterial()
-        material.baseColor = .init(tint: color)
-        material.roughness = .init(floatLiteral: roughness)
-        material.metallic = .init(floatLiteral: metallic)
-        return material
-    }
 
     /// Approximate colour of a black body at the given temperature.
     static func color(kelvin: Float) -> NSColor {
@@ -252,7 +369,6 @@ final class Stage: ObservableObject {
                     let k = (v - 0.5) / 0.5
                     c = SIMD3<Float>(0.55, 0.45, 0.38) * (1 - k) + SIMD3<Float>(0.15, 0.12, 0.1) * k
                 }
-                // Window blob
                 let du = (u - 0.62) * 2, dv = (v - 0.42) * 3
                 let blob = exp(-(du * du + dv * dv) * 18)
                 c += SIMD3<Float>(0.8, 0.9, 1.0) * blob
